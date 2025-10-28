@@ -16,21 +16,22 @@ Unified MCP interface that proxies requests to multiple backend MCP servers.
 │         Aggregator MCP Server (Port 8003)                   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  Unified MCP Interface                               │   │
-│  │  - 19 tools total (2 health + 10 memory + 7 vector) │   │
-│  │  - Handles routing internally                        │   │
-│  │  - Single /mcp/sse & /mcp/messages endpoint          │   │
+│  │  - 4 agent tools (search/query only)                │   │
+│  │  - 6 Innocody triggers (HTTP endpoints)              │   │
+│  │  - 3 admin endpoints (HTTP only)                     │   │
 │  └──────────────────────────────────────────────────────┘   │
 └────────┬──────────────────────────────────────────────────┬──┘
          │                                                  │
          │ HTTP Proxy                                       │ HTTP Proxy
          ▼                                                  ▼
 ┌──────────────────────┐                        ┌──────────────────────┐
-│  ZepAI Memory Server │                        │  LTM Vector Server   │
+│  ZepAI Memory Server │                        │  LTM Server          │
 │  (Port 8002)         │                        │  (Port 8000)         │
 │                      │                        │                      │
 │ - Knowledge Graph    │                        │ - Vector Database    │
 │ - Conversation Memory│                        │ - Code Indexing      │
-│ - 10 tools           │                        │ - 7 tools            │
+│ - 4 tools            │                        │ - Knowledge Graph    │
+│                      │                        │ - 8 tools            │
 └──────────────────────┘                        └──────────────────────┘
 ```
 

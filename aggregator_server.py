@@ -6,12 +6,16 @@ Unified MCP interface that proxies requests to multiple backend MCP servers.
 Architecture:
 - Aggregator Server (Port 8003) - This server
 - ZepAI Memory Server (Port 8002) - Knowledge Graph + Conversation Memory
-- LTM Vector Server (Port 8000) - Vector Database + Code Indexing
+- LTM Vector Server (Port 8000) - Vector Database + Code Indexing + Knowledge Graph
 
 Current Status:
-    ZepAI Memory Server (8002) - READY (4 tools)
-    LTM Vector Server (8000) - READY (6 tools)
-    Total: 12 tools available (consolidated from 17)
+    ZepAI Memory Server (8002) - READY (1 search tool)
+    LTM Vector Server (8000) - READY (3 search tools)
+    Total: 4 tools available for agents (search/query only)
+    
+    Innocody triggers (HTTP endpoints):
+    - Memory ingest, LTM indexing, file operations available via HTTP
+    - Admin tools (health, info, stats) available via HTTP
 
 The Aggregator exposes all tools from both servers as a single MCP interface.
 Clients connect to the Aggregator and can access all tools transparently.
@@ -52,19 +56,16 @@ from mcp_client import get_clients, close_clients
 mcp = FastMCP(name=config.AGGREGATOR_NAME)
 
 logger.info(f"Created MCP server: {mcp.name}")
-logger.info("Status: ZepAI (8002) ✅ | LTM (8000) ✅ | Total: 12 tools (consolidated)")
+logger.info("Status: ZepAI (8002) ✅ | LTM (8000) ✅ | Total: 4 search tools for agents")
 
 # ============================================================================
-# HEALTH & STATUS TOOLS
+# INTERNAL ADMIN FUNCTIONS (Not exposed as MCP tools)
 # ============================================================================
 
-@mcp.tool()
-async def health_check() -> Dict[str, Any]:
+async def _health_check() -> Dict[str, Any]:
     """
-    Check health status of all connected servers
-    
-    Returns:
-        Dictionary with health status of each server
+    Internal function: Check health status of all connected servers
+    Used by HTTP endpoints, not exposed to agents
     """
     clients = await get_clients()
     health_status = await clients.health_check_all()
@@ -76,13 +77,10 @@ async def health_check() -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
-async def get_server_info() -> Dict[str, Any]:
+async def _get_server_info() -> Dict[str, Any]:
     """
-    Get information about all connected servers and available tools
-    
-    Returns:
-        Dictionary with server information and available endpoints
+    Internal function: Get information about all connected servers
+    Used by HTTP endpoints, not exposed to agents
     """
     clients = await get_clients()
     schemas = await clients.get_all_schemas()
@@ -104,8 +102,8 @@ async def get_server_info() -> Dict[str, Any]:
             "title": memory_schema.get("info", {}).get("title", "ZepAI Memory Layer"),
             "version": memory_schema.get("info", {}).get("version", "Unknown"),
             "endpoints_count": len(memory_schema.get("paths", {})),
-            "tools": 4,
-            "description": "Knowledge Graph + Conversation Memory (consolidated)"
+            "tools": 2,
+            "description": "Knowledge Graph + Conversation Memory"
         }
     
     # LTM Vector Server info
@@ -113,18 +111,18 @@ async def get_server_info() -> Dict[str, Any]:
         ltm_schema = schemas["ltm_server"]
         info["connected_servers"]["ltm_vector_server"] = {
             "url": config.LTM_SERVER_URL,
-            "title": ltm_schema.get("info", {}).get("title", "LTM Vector Database"),
+            "title": ltm_schema.get("info", {}).get("title", "LTM API"),
             "version": ltm_schema.get("info", {}).get("version", "Unknown"),
             "endpoints_count": len(ltm_schema.get("paths", {})),
-            "tools": 6,
-            "description": "Vector Database + Code Indexing (consolidated)"
+            "tools": 8,
+            "description": "Vector Database + Code Indexing + Knowledge Graph"
         }
     
     return info
 
 
 # ============================================================================
-# MEMORY SERVER TOOLS (Proxy to Port 8002)
+# AGENT TOOLS - SEARCH/QUERY ONLY (Exposed as MCP tools)
 # ============================================================================
 
 @mcp.tool()
@@ -135,7 +133,7 @@ async def memory_search(
     use_llm_classification: bool = False
 ) -> Dict[str, Any]:
     """
-    Search in memory knowledge graph
+    Search in memory knowledge graph for relevant context
     
     Args:
         query: Search query string
@@ -164,42 +162,11 @@ async def memory_search(
     )
 
 
-@mcp.tool()
-async def memory_search_code(
-    query: str,
-    project_id: Optional[str] = None,
-    limit: int = 10
-) -> Dict[str, Any]:
-    """
-    Search code memories with filters
-    
-    Args:
-        query: Search query string
-        project_id: Project ID (optional)
-        limit: Maximum number of results
-    
-    Returns:
-        Code search results from memory server
-    """
-    clients = await get_clients()
-    
-    payload = {
-        "query": query,
-        "limit": limit
-    }
-    if project_id:
-        payload["project_id"] = project_id
-    
-    return await clients.memory_client.proxy_request(
-        "POST",
-        "/search/code",
-        json_data=payload,
-        retries=config.MAX_RETRIES
-    )
+# ============================================================================
+# INNOCODY TRIGGER FUNCTIONS - MEMORY (HTTP endpoints only)
+# ============================================================================
 
-
-@mcp.tool()
-async def memory_ingest(
+async def _memory_ingest(
     content: str | Dict[str, Any],
     content_type: str = "text",
     project_id: Optional[str] = None,
@@ -207,30 +174,8 @@ async def memory_ingest(
     metadata: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
-    Universal ingest tool for all content types
-    
-    Args:
-        content: Content to ingest (string for text/code, dict for json/conversation)
-        content_type: Type of content - "text", "code", "json", or "conversation"
-        project_id: Project ID (optional)
-        language: Programming language (required for code type)
-        metadata: Additional metadata (optional)
-    
-    Returns:
-        Ingestion result from memory server
-    
-    Examples:
-        # Ingest text
-        memory_ingest("Hello world", "text", project_id="proj1")
-        
-        # Ingest code
-        memory_ingest("def hello(): pass", "code", language="python")
-        
-        # Ingest JSON
-        memory_ingest({"key": "value"}, "json")
-        
-        # Ingest conversation
-        memory_ingest({"messages": [...]}, "conversation")
+    Internal function: Ingest content into memory
+    Called by Innocody engine triggers, not exposed to agents
     """
     clients = await get_clients()
     
@@ -280,27 +225,13 @@ async def memory_ingest(
     )
 
 
-@mcp.tool()
-async def memory_stats(
+async def _memory_stats(
     stats_type: str = "project",
     project_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Get statistics from memory server
-    
-    Args:
-        stats_type: Type of stats - "project" or "cache"
-        project_id: Project ID (required for project stats)
-    
-    Returns:
-        Statistics from memory server
-    
-    Examples:
-        # Get project stats
-        memory_stats("project", project_id="proj1")
-        
-        # Get cache stats
-        memory_stats("cache")
+    Internal function: Get statistics from memory server
+    Used by admin endpoints, not exposed to agents
     """
     clients = await get_clients()
     
@@ -326,41 +257,20 @@ async def memory_stats(
 
 
 # ============================================================================
-# LTM VECTOR DB TOOLS (Proxy to Port 8000)
+# AGENT TOOLS - LTM SEARCH/QUERY (Exposed as MCP tools)
 # ============================================================================
-
-@mcp.tool()
-async def ltm_process_repo(repo_path: str) -> Dict[str, Any]:
-    """
-    Process repository for vector indexing
-    
-    Args:
-        repo_path: Path to repository to process
-    
-    Returns:
-        Processing result from LTM server
-    """
-    clients = await get_clients()
-    
-    return await clients.ltm_client.proxy_request(
-        "POST",
-        "/repos/process",
-        params={"repo_path": repo_path},
-        retries=config.MAX_RETRIES
-    )
-
 
 @mcp.tool()
 async def ltm_query_vector(query: str, top_k: int = 10) -> Dict[str, Any]:
     """
-    Query vector database for semantic code search
+    Search code semantically using vector embeddings
     
     Args:
-        query: Search query string
+        query: Natural language query to find similar code
         top_k: Number of top results to return
     
     Returns:
-        Vector search results from LTM server
+        Most similar code chunks from vector database
     """
     clients = await get_clients()
     
@@ -375,13 +285,13 @@ async def ltm_query_vector(query: str, top_k: int = 10) -> Dict[str, Any]:
 @mcp.tool()
 async def ltm_search_file(filepath: str) -> Dict[str, Any]:
     """
-    Search for specific file in vector database
+    Get all indexed chunks of a specific file
     
     Args:
-        filepath: Path to file to search
+        filepath: Absolute path to file
     
     Returns:
-        File search results from LTM server
+        All code chunks from the file in vector database
     """
     clients = await get_clients()
     
@@ -394,15 +304,49 @@ async def ltm_search_file(filepath: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def ltm_add_file(filepath: str) -> Dict[str, Any]:
+async def ltm_find_code(query: str) -> Dict[str, Any]:
     """
-    Add file to vector database
+    Find code entities (functions, classes) in knowledge graph
     
     Args:
-        filepath: Path to file to add
+        query: Search query to find code entities
     
     Returns:
-        Addition result from LTM server
+        Functions, classes, variables matching the query from graph
+    """
+    clients = await get_clients()
+    
+    return await clients.ltm_client.proxy_request(
+        "POST",
+        "/graph/find_code/",
+        params={"query": query},
+        retries=config.MAX_RETRIES
+    )
+
+
+# ============================================================================
+# INNOCODY TRIGGER FUNCTIONS - LTM (HTTP endpoints only)
+# ============================================================================
+
+async def _ltm_process_repo(repo_path: str) -> Dict[str, Any]:
+    """
+    Internal function: Index repository into graph and vector DB
+    Called by Innocody engine triggers, not exposed to agents
+    """
+    clients = await get_clients()
+    
+    return await clients.ltm_client.proxy_request(
+        "POST",
+        "/repos/process_repo/",
+        params={"repo_path": repo_path},
+        retries=config.MAX_RETRIES
+    )
+
+
+async def _ltm_add_file(filepath: str) -> Dict[str, Any]:
+    """
+    Internal function: Add file to vector database
+    Called by Innocody engine triggers, not exposed to agents
     """
     clients = await get_clients()
     
@@ -414,30 +358,13 @@ async def ltm_add_file(filepath: str) -> Dict[str, Any]:
     )
 
 
-@mcp.tool()
-async def ltm_delete(
+async def _ltm_delete(
     filepath: Optional[str] = None,
     uuids: Optional[list] = None
 ) -> Dict[str, Any]:
     """
-    Delete from vector database by filepath or UUIDs
-    
-    Args:
-        filepath: Path to file to delete (optional)
-        uuids: List of UUIDs to delete (optional)
-    
-    Returns:
-        Deletion result from LTM server
-    
-    Examples:
-        # Delete by filepath
-        ltm_delete(filepath="/path/to/file.py")
-        
-        # Delete by UUIDs
-        ltm_delete(uuids=["uuid1", "uuid2"])
-    
-    Note:
-        Must provide either filepath or uuids, not both
+    Internal function: Delete from vector database
+    Called by Innocody engine triggers, not exposed to agents
     """
     clients = await get_clients()
     
@@ -462,16 +389,10 @@ async def ltm_delete(
         return {"error": "Must provide either filepath or uuids"}
 
 
-@mcp.tool()
-async def ltm_chunk_file(file_path: str) -> Dict[str, Any]:
+async def _ltm_chunk_file(file_path: str) -> Dict[str, Any]:
     """
-    Chunk file using AST-based chunking
-    
-    Args:
-        file_path: Path to file to chunk
-    
-    Returns:
-        Chunking result from LTM server
+    Internal function: Chunk file using AST
+    Called by Innocody engine triggers, not exposed to agents
     """
     clients = await get_clients()
     
@@ -479,6 +400,21 @@ async def ltm_chunk_file(file_path: str) -> Dict[str, Any]:
         "POST",
         "/files/chunks",
         params={"file_path": file_path},
+        retries=config.MAX_RETRIES
+    )
+
+
+async def _ltm_update_files(file_updates: list) -> Dict[str, Any]:
+    """
+    Internal function: Update files in graph and vector DB
+    Called by Innocody engine triggers, not exposed to agents
+    """
+    clients = await get_clients()
+    
+    return await clients.ltm_client.proxy_request(
+        "PUT",
+        "/repos/files/changes/",
+        json_data=file_updates,
         retries=config.MAX_RETRIES
     )
 
@@ -522,19 +458,94 @@ def create_http_app():
                 "mcp": "/mcp",
                 "openapi_docs": "/docs",
                 "openapi_schema": "/openapi.json",
+                "admin": {
+                    "health": "/admin/health",
+                    "info": "/admin/info",
+                    "stats": "/admin/stats/{type}"
+                },
+                "triggers": {
+                    "memory_ingest": "/triggers/memory/ingest",
+                    "ltm_process_repo": "/triggers/ltm/process_repo",
+                    "ltm_add_file": "/triggers/ltm/add_file",
+                    "ltm_update_files": "/triggers/ltm/update_files",
+                    "ltm_delete": "/triggers/ltm/delete",
+                    "ltm_chunk_file": "/triggers/ltm/chunk_file"
+                }
             },
             "connected_servers": {
                 "zepai_memory_server": config.MEMORY_SERVER_URL,
                 "ltm_vector_server": config.LTM_SERVER_URL
             },
-            "tools_count": 12,
-            "tools_breakdown": {
-                "health": 2,
-                "memory": 4,
-                "vector": 6
-            },
-            "note": "Consolidated from 17 tools for better usability"
+            "agent_tools_count": 4,
+            "agent_tools": [
+                "memory_search",
+                "ltm_query_vector",
+                "ltm_search_file",
+                "ltm_find_code"
+            ],
+            "innocody_triggers_count": 6,
+            "note": "Agents use search tools only. Innocody engine uses trigger endpoints for updates."
         }
+    
+    # ========================================================================
+    # ADD ADMIN ENDPOINTS (HTTP only, not MCP tools)
+    # ========================================================================
+    @combined_app.get("/admin/health", operation_id="admin_health_check")
+    async def admin_health_check():
+        """Admin endpoint: Check health of all servers"""
+        return await _health_check()
+    
+    @combined_app.get("/admin/info", operation_id="admin_server_info")
+    async def admin_server_info():
+        """Admin endpoint: Get detailed server information"""
+        return await _get_server_info()
+    
+    @combined_app.get("/admin/stats/{stats_type}", operation_id="admin_stats")
+    async def admin_stats(stats_type: str, project_id: Optional[str] = None):
+        """Admin endpoint: Get statistics (project or cache)"""
+        return await _memory_stats(stats_type, project_id)
+    
+    # ========================================================================
+    # INNOCODY TRIGGER ENDPOINTS (HTTP only, for Innocody engine)
+    # ========================================================================
+    
+    # Memory triggers
+    @combined_app.post("/triggers/memory/ingest", operation_id="trigger_memory_ingest")
+    async def trigger_memory_ingest(
+        content: str | Dict[str, Any],
+        content_type: str = "text",
+        project_id: Optional[str] = None,
+        language: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ):
+        """Innocody trigger: Ingest content into memory"""
+        return await _memory_ingest(content, content_type, project_id, language, metadata)
+    
+    # LTM triggers
+    @combined_app.post("/triggers/ltm/process_repo", operation_id="trigger_ltm_process_repo")
+    async def trigger_ltm_process_repo(repo_path: str):
+        """Innocody trigger: Index repository"""
+        return await _ltm_process_repo(repo_path)
+    
+    @combined_app.post("/triggers/ltm/add_file", operation_id="trigger_ltm_add_file")
+    async def trigger_ltm_add_file(filepath: str):
+        """Innocody trigger: Add file to vector DB"""
+        return await _ltm_add_file(filepath)
+    
+    @combined_app.put("/triggers/ltm/update_files", operation_id="trigger_ltm_update_files")
+    async def trigger_ltm_update_files(file_updates: list):
+        """Innocody trigger: Update files in graph and vector DB"""
+        return await _ltm_update_files(file_updates)
+    
+    @combined_app.delete("/triggers/ltm/delete", operation_id="trigger_ltm_delete")
+    async def trigger_ltm_delete(filepath: Optional[str] = None, uuids: Optional[list] = None):
+        """Innocody trigger: Delete from vector DB"""
+        return await _ltm_delete(filepath, uuids)
+    
+    @combined_app.post("/triggers/ltm/chunk_file", operation_id="trigger_ltm_chunk_file")
+    async def trigger_ltm_chunk_file(file_path: str):
+        """Innocody trigger: Chunk file using AST"""
+        return await _ltm_chunk_file(file_path)
     
     # ========================================================================
     # ADD CORS MIDDLEWARE
@@ -609,20 +620,33 @@ if __name__ == "__main__":
     logger.info(f"")
     logger.info(f"Connected Servers:")
     logger.info(f"  ✅ ZepAI Memory Server: {config.MEMORY_SERVER_URL}")
-    logger.info(f"     - Knowledge Graph + Conversation Memory")
-    logger.info(f"     - 10 tools available")
-    logger.info(f"")
     logger.info(f"  ✅ LTM Vector Server: {config.LTM_SERVER_URL}")
-    logger.info(f"     - Vector Database + Code Indexing")
-    logger.info(f"     - 7 tools available")
+    logger.info(f"")
+    logger.info(f"🤖 MCP Tools for Agents: 4 search tools")
+    logger.info(f"  - memory_search: Search in memory knowledge graph")
+    logger.info(f"  - ltm_query_vector: Semantic code search (vector DB)")
+    logger.info(f"  - ltm_search_file: Get all chunks of a file")
+    logger.info(f"  - ltm_find_code: Find code entities in graph")
+    logger.info(f"")
+    logger.info(f"🔧 Innocody Trigger Endpoints: 6 endpoints")
+    logger.info(f"  Memory:")
+    logger.info(f"    POST /triggers/memory/ingest")
+    logger.info(f"  LTM:")
+    logger.info(f"    POST /triggers/ltm/process_repo")
+    logger.info(f"    POST /triggers/ltm/add_file")
+    logger.info(f"    PUT  /triggers/ltm/update_files")
+    logger.info(f"    DELETE /triggers/ltm/delete")
+    logger.info(f"    POST /triggers/ltm/chunk_file")
+    logger.info(f"")
+    logger.info(f"⚙️  Admin Endpoints: 3 endpoints")
+    logger.info(f"    GET /admin/health")
+    logger.info(f"    GET /admin/info")
+    logger.info(f"    GET /admin/stats/{{type}}")
     logger.info(f"")
     logger.info(f"HTTP Endpoints:")
     logger.info(f"  - MCP Endpoint: http://{config.AGGREGATOR_HOST}:{config.AGGREGATOR_PORT}/mcp")
     logger.info(f"  - OpenAPI Docs: http://{config.AGGREGATOR_HOST}:{config.AGGREGATOR_PORT}/docs")
     logger.info(f"  - Root API: http://{config.AGGREGATOR_HOST}:{config.AGGREGATOR_PORT}/")
-    logger.info(f"")
-    logger.info(f"MCP Tools: 12 tools available (2 health + 4 memory + 6 vector)")
-    logger.info(f"  Note: Consolidated from 17 tools for better usability")
     logger.info(f"")
     logger.info(f"To use:")
     logger.info(f"  1. View docs: http://{config.AGGREGATOR_HOST}:{config.AGGREGATOR_PORT}/docs")
