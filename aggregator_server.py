@@ -765,13 +765,21 @@ def create_http_app():
     # Memory triggers
     @combined_app.post("/triggers/memory/ingest", operation_id="trigger_memory_ingest")
     async def trigger_memory_ingest(
-        content: str | Dict[str, Any],
+        request: Request,
         content_type: str = "text",
         project_id: Optional[str] = None,
         language: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ):
         """Innocody trigger: Ingest content into memory"""
+        # Parse body directly from request
+        try:
+            content = await request.json()
+        except Exception as e:
+            # If JSON parsing fails, try text
+            content = await request.body()
+            content = content.decode('utf-8') if content else ""
+        
         return await _memory_ingest(content, content_type, project_id, language, metadata)
     
     @combined_app.post("/triggers/memory/ingest_code_changes", operation_id="trigger_memory_ingest_code_changes")
