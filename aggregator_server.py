@@ -405,26 +405,9 @@ async def _ltm_query_vector(query: str, top_k: int = 10) -> Dict[str, Any]:
     )
 
 
-async def _ltm_search_file(filepath: str) -> Dict[str, Any]:
-    """Internal function: Get file chunks"""
-    clients = await get_clients()
-    return await clients.ltm_client.proxy_request(
-        "GET",
-        "/vectors/files",
-        params={"filepath": filepath},
-        retries=config.MAX_RETRIES
-    )
-
-
-async def _ltm_find_code(query: str) -> Dict[str, Any]:
-    """Internal function: Find code entities"""
-    clients = await get_clients()
-    return await clients.ltm_client.proxy_request(
-        "POST",
-        "/graph/find_code/",
-        params={"query": query},
-        retries=config.MAX_RETRIES
-    )
+# Removed _ltm_search_file and _ltm_find_code
+# All search functionality now consolidated in ltm_query_vector which uses /vectors/query
+# This endpoint returns both vector results AND graph data in result_graph field
 
 
 async def _memory_search(
@@ -455,46 +438,64 @@ async def _memory_search(
 # ============================================================================
 
 @mcp.tool()
-async def ltm_query_vector(query: str, top_k: int = 10) -> Dict[str, Any]:
+async def ltm_search(query: str, top_k: int = 10) -> Dict[str, Any]:
     """
-    Search code semantically using vector embeddings
+    Search code semantically using unified vector + graph search.
+    
+    This is the ONLY LTM search tool you need. It returns:
+    - results: Vector search results with code chunks, scores, metadata
+    - result_graph: Knowledge graph data with entities, relationships, hierarchical context
     
     Args:
-        query: Natural language query to find similar code
-        top_k: Number of top results to return
+        query: Natural language query to find similar code (e.g., "where is pacman's maze?")
+        top_k: Number of top results to return (default: 10)
     
     Returns:
-        Most similar code chunks from vector database
+        {
+            "results": [
+                {
+                    "id": "uuid",
+                    "score": 0.34,
+                    "payload": {
+                        "uuid": "uuid",
+                        "filepath": "path/to/file.py",
+                        "start_line": 18,
+                        "end_line": 18,
+                        "language": ".py",
+                        "type": "function_definition",
+                        "name": ["function_name"],
+                        "code": "actual code content",
+                        "hybrid_score": 0.99,
+                        "rerank_score": 1.0
+                    }
+                }
+            ],
+            "result_graph": {
+                "uuid": {
+                    "labels": "Function|Class|Variable",
+                    "file_path": "path/to/file.py",
+                    "language": "python",
+                    "name": "entity_name",
+                    "ingoing_relations": {...},
+                    "outgoing_relations": {...},
+                    "hierarchical_context": [...]
+                }
+            }
+        }
+    
+    Example:
+        result = ltm_search("authentication logic", top_k=5)
+        for item in result["results"]:
+            print(f"File: {item['payload']['filepath']}")
+            print(f"Code: {item['payload']['code']}")
+            print(f"Score: {item['score']}")
+        
+        # Access graph data
+        for uuid, entity in result["result_graph"].items():
+            print(f"Entity: {entity['name']} ({entity['labels']})")
+            print(f"Relations: {entity['outgoing_relations']}")
     """
     return await _ltm_query_vector(query, top_k)
-
-
-@mcp.tool()
-async def ltm_search_file(filepath: str) -> Dict[str, Any]:
-    """
-    Get all indexed chunks of a specific file
-    
-    Args:
-        filepath: Absolute path to file
-    
-    Returns:
-        All code chunks from the file in vector database
-    """
-    return await _ltm_search_file(filepath)
-
-
-@mcp.tool()
-async def ltm_find_code(query: str) -> Dict[str, Any]:
-    """
-    Find code entities (functions, classes) in knowledge graph
-    
-    Args:
-        query: Search query to find code entities
-    
-    Returns:
-        Functions, classes, variables matching the query from graph
-    """
-    return await _ltm_find_code(query)
 
 
 # ============================================================================
@@ -575,12 +576,15 @@ async def _ltm_delete(
     uuids: Optional[list] = None
 ) -> Dict[str, Any]:
     """
-    Internal function: Delete from vector database AND code graph
+    Internal function: Unified delete from vector database AND code graph
     Called by Innocody engine triggers, not exposed to agents
     
-    Deletes from both:
-    1. Vector DB - remove embeddings
-    2. Code Graph - remove code entities and relationships
+    NEW: Uses unified endpoint that ensures proper synchronization:
+    1. Get UUIDs from Vector DB BEFORE deletion
+    2. Delete from Code Graph FIRST (with UUID verification)
+    3. Delete from Vector DB LAST (only if Graph succeeded)
+    
+    This prevents race conditions and ensures data consistency.
     """
     clients = await get_clients()
     
@@ -588,57 +592,99 @@ async def _ltm_delete(
         return {"error": "Provide either filepath or uuids, not both"}
     
     if filepath:
-        # Step 1: Delete from Vector DB
-        vector_result = await clients.ltm_client.proxy_request(
-            "DELETE",
-            "/vectors/filepath",
-            params={"filepath": filepath},
-            retries=config.MAX_RETRIES
-        )
+        logger.info(f"🗑️ Using UNIFIED delete endpoint for: {filepath}")
         
-        # Step 2: Delete from Code Graph
         try:
-            graph_result = await clients.ltm_client.proxy_request(
+            # ✅ NEW: Use unified delete endpoint
+            result = await clients.ltm_client.proxy_request(
                 "DELETE",
-                "/graph/files/",
+                "/unified/delete",  # ← NEW unified endpoint
                 json_data={
-                    "file_name": filepath,
-                    "file_action": "remove",
-                    "file_name_rename": "",
-                    "line1": 0,
-                    "line2": 0,
-                    "lines_add": "",
-                    "lines_remove": "",
-                    "file_rename": "",
-                    "application_details": "Auto-remove file from code graph"
+                    "filepath": filepath,
+                    "verify_uuids": True,
+                    "force": False
                 },
                 retries=config.MAX_RETRIES
             )
             
+            logger.info(f"✅ Unified delete successful: {result.get('message')}")
             return {
                 "status": "success",
-                "message": f"File deleted from both vector DB and code graph: {filepath}",
-                "vector_db": vector_result,
-                "code_graph": graph_result
+                "method": "unified",
+                "message": result.get("message"),
+                "vector_db_deleted": result.get("vector_db_deleted"),
+                "graph_deleted": result.get("graph_deleted"),
+                "uuids_verified": result.get("uuids_verified", [])
             }
+            
         except Exception as e:
-            logger.warning(f"Vector DB deleted but code graph removal failed for {filepath}: {str(e)}")
-            return {
-                "status": "partial_success",
-                "message": f"File deleted from vector DB but code graph removal failed: {filepath}",
-                "vector_db": vector_result,
-                "code_graph_error": str(e)
-            }
+            logger.error(f"❌ Unified delete failed for {filepath}: {e}")
+            
+            # Fallback to old method if unified endpoint fails
+            logger.warning(f"⚠️ Falling back to old delete method...")
+            return await _ltm_delete_fallback(filepath)
+
     elif uuids:
-        # UUIDs are only for vector DB, not for code graph
-        return await clients.ltm_client.proxy_request(
+        # Delete by UUIDs (only from Vector DB)
+        logger.info(f"🗑️ Deleting by UUIDs: {len(uuids)} items")
+        result = await clients.ltm_client.proxy_request(
             "DELETE",
             "/vectors/uuids",
             json_data=uuids,
             retries=config.MAX_RETRIES
         )
+        return result
+    
     else:
         return {"error": "Must provide either filepath or uuids"}
+
+
+async def _ltm_delete_fallback(filepath: str) -> Dict[str, Any]:
+    """
+    Fallback delete method (old approach) if unified endpoint fails
+    
+    ❌ WARNING: This method has race condition issues!
+    Only used as emergency fallback.
+    """
+    clients = await get_clients()
+    
+    logger.warning(f"⚠️ Using FALLBACK delete (has race conditions!)")
+    
+    # Old approach: Vector DB first, then Graph
+    vector_result = await clients.ltm_client.proxy_request(
+        "DELETE",
+        "/vectors/filepath",
+        params={"filepath": filepath},
+        retries=config.MAX_RETRIES
+    )
+    
+    try:
+        graph_result = await clients.ltm_client.proxy_request(
+            "DELETE",
+            "/graph/files/",
+            json_data={
+                "file_name": filepath,
+                "file_action": "remove"
+            },
+            retries=config.MAX_RETRIES
+        )
+        
+        return {
+            "status": "success",
+            "method": "fallback",
+            "message": f"File deleted (fallback method): {filepath}",
+            "vector_db": vector_result,
+            "code_graph": graph_result
+        }
+    except Exception as e:
+        logger.error(f"❌ Graph delete failed: {e}")
+        return {
+            "status": "partial",
+            "method": "fallback",
+            "message": f"Vector DB deleted, Graph failed: {filepath}",
+            "vector_db": vector_result,
+            "code_graph_error": str(e)
+        }
 
 
 async def _ltm_chunk_file(file_path: str) -> Dict[str, Any]:
@@ -654,6 +700,34 @@ async def _ltm_chunk_file(file_path: str) -> Dict[str, Any]:
         params={"file_path": file_path},
         retries=config.MAX_RETRIES
     )
+
+
+async def _ltm_build_graph(graph_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Internal function: Build graph from pre-parsed AST data (PRODUCTION READY)
+    Called by Innocody engine triggers, not exposed to agents
+    
+    This is the production-ready solution that eliminates LTM's filesystem dependency.
+    Engine sends complete graph payload, LTM just stores it.
+    """
+    clients = await get_clients()
+    
+    logger.info(f"🏗️ Building for: {graph_payload.get('file_path', 'unknown')}")
+    
+    try:
+        result = await clients.ltm_client.proxy_request(
+            "POST",
+            "/unified/build_from_engine",
+            json_data=graph_payload,
+            retries=config.MAX_RETRIES
+        )
+        
+        logger.info(f"✅ Graph built successfully: {result.get('file_uuid', 'unknown')}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Graph build failed: {str(e)}")
+        raise
 
 
 async def _ltm_update_files(file_updates: list) -> Dict[str, Any]:
@@ -729,13 +803,16 @@ def create_http_app():
                 "zepai_memory_server": config.MEMORY_SERVER_URL,
                 "ltm_vector_server": config.LTM_SERVER_URL
             },
-            "agent_tools_count": 4,
+            "agent_tools_count": 2,
             "agent_tools": [
                 "memory_search",
-                "ltm_query_vector",
-                "ltm_search_file",
-                "ltm_find_code"
+                "ltm_search"
             ],
+            "deprecated_tools": {
+                "ltm_query_vector": "Use ltm_search instead (still supported for backward compatibility)",
+                "ltm_search_file": "Removed - use ltm_search which includes graph data",
+                "ltm_find_code": "Removed - use ltm_search which includes graph data"
+            },
             "innocody_triggers_count": 7,
             "note": "Agents use search tools only. Innocody engine uses trigger endpoints for updates."
         }
@@ -840,6 +917,28 @@ def create_http_app():
         """Innocody trigger: Chunk file using AST"""
         return await _ltm_chunk_file(file_path)
     
+    @combined_app.post("/triggers/ltm/build_graph", operation_id="trigger_ltm_build_graph")
+    async def trigger_ltm_build_graph(graph_payload: Dict[str, Any] = Body(...)):
+        """
+        Innocody trigger: Build graph from pre-parsed AST data (PRODUCTION READY)
+        
+        This endpoint receives complete graph payload from Engine, eliminating
+        the need for LTM to read files from local filesystem.
+        
+        Payload structure:
+        {
+            "file_path": "/path/to/file.py",
+            "relative_path": "src/main.py",
+            "language": "python",
+            "repo_name": "my-project",
+            "functions": [...],
+            "classes": [...],
+            "variables": [...],
+            "imports": [...]
+        }
+        """
+        return await _ltm_build_graph(graph_payload)
+    
     # ========================================================================
     # MCP TOOL CALL ENDPOINT (For Innocody Engine tool integration)
     # ========================================================================
@@ -867,25 +966,19 @@ def create_http_app():
                     limit=args.get("limit", 10),
                     use_llm_classification=args.get("use_llm_classification", False)
                 )
-            elif tool_name == "ltm_query_vector":
+            elif tool_name == "ltm_search" or tool_name == "ltm_query_vector":
+                # Support both new name (ltm_search) and legacy name (ltm_query_vector)
                 result = await _ltm_query_vector(
                     query=args.get("query", ""),
                     top_k=args.get("top_k", 10)
-                )
-            elif tool_name == "ltm_search_file":
-                result = await _ltm_search_file(
-                    filepath=args.get("filepath", "")
-                )
-            elif tool_name == "ltm_find_code":
-                result = await _ltm_find_code(
-                    query=args.get("query", "")
                 )
             else:
                 return JSONResponse(
                     status_code=404,
                     content={
                         "error": f"Unknown tool: {tool_name}",
-                        "available_tools": ["memory_search", "ltm_query_vector", "ltm_search_file", "ltm_find_code"]
+                        "available_tools": ["memory_search", "ltm_search"],
+                        "note": "ltm_search provides unified vector + graph search. Old tools (ltm_search_file, ltm_find_code) are deprecated."
                     }
                 )
             
@@ -988,22 +1081,23 @@ if __name__ == "__main__":
     logger.info(f"  ✅ ZepAI Memory Server: {config.MEMORY_SERVER_URL}")
     logger.info(f"  ✅ LTM Vector Server: {config.LTM_SERVER_URL}")
     logger.info(f"")
-    logger.info(f"🤖 MCP Tools for Agents: 4 search tools")
-    logger.info(f"  - memory_search: Search in memory knowledge graph")
-    logger.info(f"  - ltm_query_vector: Semantic code search (vector DB)")
-    logger.info(f"  - ltm_search_file: Get all chunks of a file")
-    logger.info(f"  - ltm_find_code: Find code entities in graph")
+    logger.info(f"🤖 MCP Tools for Agents: 2 unified search tools")
+    logger.info(f"  - memory_search: Search in conversation/memory knowledge graph (ZepAI)")
+    logger.info(f"  - ltm_search: Unified vector + graph code search (LTM)")
+    logger.info(f"    └─ Returns both vector results AND graph relationships in one call")
+    logger.info(f"    └─ Deprecated: ltm_query_vector, ltm_search_file, ltm_find_code")
     logger.info(f"")
-    logger.info(f"🔧 Innocody Trigger Endpoints: 7 endpoints")
+    logger.info(f"🔧 Innocody Trigger Endpoints: 8 endpoints")
     logger.info(f"  Memory:")
     logger.info(f"    POST /triggers/memory/ingest")
-    logger.info(f"    POST /triggers/memory/ingest_code_changes (NEW)")
+    logger.info(f"    POST /triggers/memory/ingest_code_changes")
     logger.info(f"  LTM:")
     logger.info(f"    POST /triggers/ltm/process_repo")
     logger.info(f"    POST /triggers/ltm/add_file")
     logger.info(f"    PUT  /triggers/ltm/update_files")
     logger.info(f"    DELETE /triggers/ltm/delete")
     logger.info(f"    POST /triggers/ltm/chunk_file")
+    logger.info(f"    POST /triggers/ltm/build_graph (NEW - PRODUCTION READY) 🏗️")
     logger.info(f"")
     logger.info(f"⚙️  Admin Endpoints: 3 endpoints")
     logger.info(f"    GET /admin/health")
