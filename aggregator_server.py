@@ -730,6 +730,42 @@ async def _ltm_build_graph(graph_payload: Dict[str, Any]) -> Dict[str, Any]:
         raise
 
 
+async def _ltm_add_file_content(file_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Internal function: Add file with content (NO filesystem dependency)
+    Called by Innocody engine triggers, not exposed to agents
+    
+    PRODUCTION-READY: Engine sends file content, LTM doesn't need to read disk.
+    Cross-platform compatible (Windows/Mac/Linux/Docker).
+    
+    Expected payload:
+    {
+        "filepath": "src/main.rs",
+        "content": "fn main() { ... }",
+        "language": "rust",
+        "repo_name": "my-project" (optional)
+    }
+    """
+    clients = await get_clients()
+    
+    logger.info(f"📄 Adding file with content: {file_data.get('filepath', 'unknown')}")
+    
+    try:
+        result = await clients.ltm_client.proxy_request(
+            "POST",
+            "/vectors/add_file_content",
+            json_data=file_data,
+            retries=config.MAX_RETRIES
+        )
+        
+        logger.info(f"✅ File added successfully: {result.get('file_uuid', 'unknown')}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Add file content failed: {str(e)}")
+        raise
+
+
 async def _ltm_update_files(file_updates: list) -> Dict[str, Any]:
     """
     Internal function: Update files in graph and vector DB
@@ -899,8 +935,26 @@ def create_http_app():
     
     @combined_app.post("/triggers/ltm/add_file", operation_id="trigger_ltm_add_file")
     async def trigger_ltm_add_file(filepath: str):
-        """Innocody trigger: Add file to vector DB"""
+        """Innocody trigger: Add file to vector DB (DEPRECATED - use add_file_content)"""
         return await _ltm_add_file(filepath)
+    
+    @combined_app.post("/triggers/ltm/add_file_content", operation_id="trigger_ltm_add_file_content")
+    async def trigger_ltm_add_file_content(file_data: Dict[str, Any] = Body(...)):
+        """
+        Innocody trigger: Add file with content (PRODUCTION READY)
+        
+        No filesystem dependency - works across Windows/Mac/Linux/Docker.
+        Engine sends file content directly.
+        
+        Payload:
+        {
+            "filepath": "src/main.rs",
+            "content": "fn main() { println!(\"Hello\"); }",
+            "language": "rust",
+            "repo_name": "my-project"
+        }
+        """
+        return await _ltm_add_file_content(file_data)
     
     @combined_app.put("/triggers/ltm/update_files", operation_id="trigger_ltm_update_files")
     async def trigger_ltm_update_files(file_updates: list):
